@@ -21,7 +21,8 @@
 
 
 static volatile int ctrlC = 0;
-int fd;
+FILE *logFp = NULL;
+int usbFd;
 int rx_state;
 int rx_step;
 unsigned long timestamp;
@@ -39,9 +40,6 @@ unsigned long int micros() {
 
 void ledToggle () {
 }
-
-// prototype
-void toConsole (char *buf);
 
 //Copied the CAN_FRAME structure from the DUe_can library here (including the .h gave too many errors in x86 gcc)
 
@@ -74,6 +72,10 @@ typedef struct
 	BytesUnion data;	// 64 bits - lots of ways to access it.
 } CAN_FRAME;
 
+
+// prototypes
+void toConsole (char *buf);
+void gotFrame(CAN_FRAME *frame);
 
 
 // some cleanup between C versions
@@ -301,27 +303,27 @@ void printFrameAll (CAN_FRAME *frame) {
 
 //********************************************************************************************************
 
-sendFrame (CAN_FRAME *frame) {
+sendFrame (int bus, CAN_FRAME *frame) {
     char buffer[20];
     int bptr = 0;
     int i;
 
-    mode |= 0x100;
+    // mode |= 0x100;
     buffer [bptr++] = 0xf1;
-    buffer [bptr++] = 0;
+    buffer [bptr++] = bus & 0x10 ? 11 : 0;
     buffer [bptr++] = (frame->id      ) & 0xff;
     buffer [bptr++] = (frame->id >> 8 ) & 0xff;
     buffer [bptr++] = (frame->id >> 16) & 0xff;
     buffer [bptr++] = (frame->id >> 24) & 0xff;
-    buffer [bptr++] = 0x0;
+    buffer [bptr++] = bus & 0x0f;
     buffer [bptr++] = frame->length;
     for (i = 0; i < frame->length; i++)
         buffer [bptr++] = frame->data.byte[i];
     buffer [bptr++] = 0; // checksum
-    write (fd, buffer, bptr);
+    write (usbFd, buffer, bptr);
 }
 
-sendFrameData (uint32_t id, uint8_t length, uint32_t data0, uint32_t data1, uint32_t data2, uint32_t data3, uint32_t data4, uint32_t data5, uint32_t data6, uint32_t data7) {
+sendFrameData (int bus, uint32_t id, uint8_t length, uint32_t data0, uint32_t data1, uint32_t data2, uint32_t data3, uint32_t data4, uint32_t data5, uint32_t data6, uint32_t data7) {
   CAN_FRAME myFrame;
   myFrame.id = id;
   myFrame.length = length;
@@ -333,53 +335,56 @@ sendFrameData (uint32_t id, uint8_t length, uint32_t data0, uint32_t data1, uint
   myFrame.data.byte[5] = data5;
   myFrame.data.byte[6] = data6;
   myFrame.data.byte[7] = data7;
-  sendFrame (&myFrame);
-
+  sendFrame (bus, &myFrame);
 }
 
-sendIsoTpFlowControl (uint32_t id) {
+sendIsoTpFlowControl (int bus, uint32_t id) {
   CAN_FRAME myFrame;
   usleep (0x20 * 1000);
-  sendFrameData (id,    8, 0x30, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00);
+  sendFrameData (bus, id,    8, 0x30, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00);
 }
 
 void sendTestFrameLbcCha () {
-  sendFrameData (0x79b, 8, 0x02, 0x21, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00);
-  sendIsoTpFlowControl (0x79b);
+  sendFrameData (0, 0x79b, 8, 0x02, 0x21, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00);
+  sendIsoTpFlowControl (0, 0x79b);
 }
 
 void sendTestFrameLbcTemp () {
-  sendFrameData (0x79b, 8, 0x02, 0x21, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00);
-  sendIsoTpFlowControl (0x79b);
+  sendFrameData (0, 0x79b, 8, 0x02, 0x21, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00);
+  sendIsoTpFlowControl (0, 0x79b);
 }
 
 void sendTestFrameLbcShunt () {
-  sendFrameData (0x79b, 8, 0x02, 0x21, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00);
-  sendIsoTpFlowControl (0x79b);
+  sendFrameData (0, 0x79b, 8, 0x02, 0x21, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00);
+  sendIsoTpFlowControl (0, 0x79b);
 }
 
 void sendTestFrameEvcMaxPwr () {
-  sendFrameData (0x7e4, 8, 0x03, 0x22, 0x34, 0x44, 0x00, 0x00, 0x00, 0x00);
+  sendFrameData (0, 0x7e4, 8, 0x03, 0x22, 0x34, 0x44, 0x00, 0x00, 0x00, 0x00);
 }
 
 void sendTestFrameEvcSoc () {
-  sendFrameData (0x7e4, 8, 0x03, 0x22, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00);
+  sendFrameData (0, 0x7e4, 8, 0x03, 0x22, 0x20, 0x02, 0x00, 0x00, 0x00, 0x00);
 }
 
 void sendTestFrameEvcAmp () {
-  sendFrameData (0x7e4, 8, 0x03, 0x22, 0x32, 0x04, 0x00, 0x00, 0x00, 0x00);
+  sendFrameData (0, 0x7e4, 8, 0x03, 0x22, 0x32, 0x04, 0x00, 0x00, 0x00, 0x00);
 }
 
 void sendTestFrameEvcVolt () {
-  sendFrameData (0x7e4, 8, 0x03, 0x22, 0x32, 0x03, 0x00, 0x00, 0x00, 0x00);
+  sendFrameData (0, 0x7e4, 8, 0x03, 0x22, 0x32, 0x03, 0x00, 0x00, 0x00, 0x00);
 }
 
 void sendWakeupInstrPanel () {
-  sendFrameData (0x743, 8, 0x02, 0x10, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00);
+  sendFrameData (0, 0x743, 8, 0x02, 0x10, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00);
 }
 
 void sendWakeupUdp () {
-  sendFrameData (0x74d, 8, 0x02, 0x10, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00);
+  sendFrameData (0, 0x74d, 8, 0x02, 0x10, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00);
+}
+
+void sendTestFrameEcho () {
+  sendFrameData (0x10, 0x100, 8, 0x02, 0x10, 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00);
 }
 
 void *sendRequests (void *voidPtr) {
@@ -405,6 +410,8 @@ void *sendRequests (void *voidPtr) {
         sendTestFrameEvcAmp ();
       } else if (loop == 30) {
         sendTestFrameEvcVolt ();
+      } else if (loop == 35) {
+        sendTestFrameEcho ();
       }
     }
 
@@ -422,6 +429,58 @@ void *sendRequests (void *voidPtr) {
     if (++loop == 50) loop = 0;
   }
 }
+
+
+
+void *sendLog (void *voidPtr) {
+
+
+  char input[80];
+  // unsigned long timestamp;
+  int bus;
+  char *pch;
+  char *pch2;
+  int dataidx;
+
+  CAN_FRAME fr;
+
+  while (ctrlC == 0) {
+    if (fgets (input, 80, logFp) == NULL) {
+      rewind (logFp);
+      fgets (input, 80, logFp);
+    }
+    if (strlen (input) > 2) {
+
+      pch = strtok (input," ");
+      // timestamp = (long int)(atof (pch) * 1000000); // ignore the timestamp
+
+      pch = strtok (NULL, " "); // ignore the type
+      if (*pch == 'R') {
+
+        pch = strtok (NULL, " "); // get the id
+        fr.id = (int)strtol(pch, NULL, 16);
+
+        pch = strtok (NULL, " "); // get the first data byte
+        fr.length = 0;
+        while (pch != NULL) {
+          if (*pch != '\n') {
+            fr.data.byte[fr.length++] = (int)strtol(pch, NULL, 16);
+          }
+          pch = strtok (NULL, " "); // get the first data byte
+        }
+        for (dataidx = fr.length; dataidx < 8; dataidx++) fr.data.byte[dataidx] = 0; // Wipe the remainder
+
+        if (usbFd) {
+          sendFrame (0x10, &fr);
+        } else {
+          gotFrame (&fr);
+        }
+      }
+    }
+    usleep (500);
+  } 
+}
+
 
 //********************************************************************************************************
 
@@ -547,66 +606,81 @@ void intHandler(int dummy) {
 int main(int argc, char *argv[])
 {
   pthread_t sendRequestsThread;     /* this variable is our reference to the second thread */
+  pthread_t sendLogThread;          /* log sending thread */
   char buffer[1024];
   int bufferPtr;
   int bytesInBuffer;
 
-  fd = open(argv[1], O_RDWR | O_NOCTTY);
-  if (fd == -1) {
-    /* Could not open the port. */
-    perror("open_port: Unable to open port arg1 - ");
-    exit (1);
+  if (*(argv[1]) != '.') {
+    usbFd = open(argv[1], O_RDWR | O_NOCTTY);
+    if (usbFd == -1) {
+      /* Could not open the port. */
+      perror("open_port: Unable to open port arg1 - ");
+      exit (1);
+    }
+  }
+
+  if (argc > 2) {
+    logFp = fopen(argv[2],"r");
+    if (logFp == NULL) {
+      perror("open_port: Unable to open file arg2 - ");
+      exit (1);
+    }
   }
 
   clearScreen();
 
   signal(SIGINT, intHandler);
 
-  // initialize GVRET
-  bufferPtr = 0;
-  buffer [bufferPtr++]  = 0xe7; // binary mode
-  buffer [bufferPtr++]  = 0xe7;
-  write (fd, buffer, bufferPtr); // send to GVRET
 
-  bufferPtr = 0;
-  buffer [bufferPtr++]  = 0xf1; // single wire mode
-  buffer [bufferPtr++]  = 8;
-  buffer [bufferPtr++]  = 0xff;
-  write (fd, buffer, bufferPtr); // send to GVRET
+  if (usbFd) {
+    // initialize GVRET
+    bufferPtr = 0;
+    buffer [bufferPtr++]  = 0xe7; // binary mode
+    buffer [bufferPtr++]  = 0xe7;
+    write (usbFd, buffer, bufferPtr); // send to GVRET
 
-  bufferPtr = 0;
-  buffer [bufferPtr++]  = 0xf1; // set can0 to 500kps
-  buffer [bufferPtr++]  = 5;
-  buffer [bufferPtr++]  = 0x20;
-  buffer [bufferPtr++]  = 0xa1;
-  buffer [bufferPtr++]  = 0x07;
-  buffer [bufferPtr++] = 0x0;
-  buffer [bufferPtr++] = 0x0;
-  buffer [bufferPtr++] = 0x0;
-  buffer [bufferPtr++] = 0x0;
-  buffer [bufferPtr++] = 0x0;
-  buffer [bufferPtr++] = 0x0;
-  write (fd, buffer, bufferPtr); // send to GVRET
+    bufferPtr = 0;
+    buffer [bufferPtr++]  = 0xf1; // single wire mode
+    buffer [bufferPtr++]  = 8;
+    buffer [bufferPtr++]  = 0xff;
+    write (usbFd, buffer, bufferPtr); // send to GVRET
 
-  bufferPtr = 0;
-  buffer [bufferPtr++]  = 0xf1; // set all LED pins to 13
-  buffer [bufferPtr++]  = 10;
-  buffer [bufferPtr++]  = 13;
-  buffer [bufferPtr++]  = 13;
-  buffer [bufferPtr++]  = 13;
-  write (fd, buffer, bufferPtr); // send to GVRET
+    bufferPtr = 0;
+    buffer [bufferPtr++] = 0xf1; // set can0 to 500kps
+    buffer [bufferPtr++] = 5;
+    buffer [bufferPtr++] = 0x20; buffer [bufferPtr++] = 0xa1; buffer [bufferPtr++] = 0x07; buffer [bufferPtr++] = 0x00;
+    buffer [bufferPtr++] = 0x00; buffer [bufferPtr++] = 0x00; buffer [bufferPtr++] = 0x00; buffer [bufferPtr++] = 0x00;
+    write (usbFd, buffer, bufferPtr); // send to GVRET
 
-  // start reading traffic from GVRET, non blocking
-  bytesInBuffer = read(fd, buffer, sizeof(buffer)-2);
-  if (bytesInBuffer < 0) {
-    fputs("read failed!\n", stderr);
-    exit (1);
+    bufferPtr = 0;
+    buffer [bufferPtr++]  = 0xf1; // set all LED pins to 13
+    buffer [bufferPtr++]  = 10;
+    buffer [bufferPtr++]  = 13;
+    buffer [bufferPtr++]  = 13;
+    buffer [bufferPtr++]  = 13;
+    write (usbFd, buffer, bufferPtr); // send to GVRET
+
+    // start reading traffic from GVRET, non blocking
+    bytesInBuffer = read(usbFd, buffer, sizeof(buffer)-2);
+    if (bytesInBuffer < 0) {
+      fputs("read failed!\n", stderr);
+      exit (1);
+    }
+
+    /* create a second thread which executes sendRequests() */
+    if (pthread_create (&sendRequestsThread, NULL, sendRequests, NULL)) {
+      perror("Error creating request thread");
+      exit (1);
+    }
   }
 
-  /* create a second thread which executes sendRequests() */
-  if (pthread_create (&sendRequestsThread, NULL, sendRequests, NULL)) {
-    perror("Error creating thread");
-    exit (1);
+  if (logFp) {
+    /* create a third thread which executes sendLog() */
+    if (pthread_create (&sendLogThread, NULL, sendLog, NULL)) {
+      perror("Error creating log thread");
+      exit (1);
+    }
   }
 
   while (bytesInBuffer >= 0 && ctrlC == 0) {
@@ -616,7 +690,8 @@ int main(int argc, char *argv[])
         procRXChar (buffer[bufferPtr]);
       }
     }
-    bytesInBuffer = read(fd, buffer, sizeof(buffer)-2);
+
+    if (usbFd) bytesInBuffer = read(usbFd, buffer, sizeof(buffer)-2);
 
     char inChar = getch();
 
@@ -664,12 +739,21 @@ int main(int argc, char *argv[])
 
   }
 
-  if  (pthread_join (sendRequestsThread, NULL)) {
-    perror("Error joining thread");
+  if (usbFd) {
+    if  (pthread_join (sendRequestsThread, NULL)) {
+      perror("Error joining thread");
+    }
+    close (usbFd);
+  }
+
+  if (logFp) {
+    if  (pthread_join (sendLogThread, NULL)) {
+      perror("Error joining thread");
+    }
+    fclose (logFp);
   }
 
   fputs("\nCtrl-C\n", stderr);
-  close (fd);
   return 0;
 }
 
